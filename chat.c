@@ -159,11 +159,10 @@ int main(int argc, char *argv[], char *envp[]) {
     }
 
     sem_lock(sem_id);
-    if (is_creator) {
+    if (is_creator || ds.shm_nattch == 1) {
         shm_buf->msg_id = 0;
-        shm_buf->active_users = 0;
     }
-    shm_buf->active_users++;
+    shm_buf->active_users = ds.shm_nattch;
     int initial_msg_id = shm_buf->msg_id;
     sem_unlock(sem_id);
 
