@@ -6,10 +6,12 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
 
 #define SHMEM_SIZE 4096
 #define SEM_KEY    2007
@@ -25,16 +27,17 @@ union semnum {
 
 struct chat_memory {
     int msg_id;
-    int active_users;
     pid_t sender_pid;
     char sender_name[64];
     char text[3900];
 };
 
-int shm_id, sem_id;
-struct chat_memory *shm_buf;
+int shm_id = -1, sem_id = -1;
+struct chat_memory *shm_buf = (struct chat_memory *)(-1);
 pid_t my_pid;
 char my_name[64];
+pthread_t recv_thread;
+int thread_started = 0;
 
 void sem_lock(int semid) {
     struct sembuf sb[1];
@@ -42,7 +45,6 @@ void sem_lock(int semid) {
     sb[0].sem_op  = -1;
     sb[0].sem_flg = SEM_UNDO;
     if (semop(semid, sb, 1) < 0) {
-        perror("semop lock error");
         exit(1);
     }
 }
@@ -53,9 +55,42 @@ void sem_unlock(int semid) {
     sb[0].sem_op  = 1;
     sb[0].sem_flg = SEM_UNDO;
     if (semop(semid, sb, 1) < 0) {
-        perror("semop unlock error");
         exit(1);
     }
+}
+
+void cleanup(int sig) {
+    void *thread_result;
+
+    if (thread_started) {
+        pthread_cancel(recv_thread);
+        if (!pthread_equal(pthread_self(), recv_thread)) {
+            pthread_join(recv_thread, &thread_result);
+        }
+        if (sig == 0 && thread_result == PTHREAD_CANCELED) {
+            fprintf(stderr, "[Поток приема сообщений корректно остановлен (Canceled)]\n");
+        }
+    }
+
+    if (shm_buf != (struct chat_memory *)(-1)) {
+        shmdt(shm_buf);
+        shm_buf = (struct chat_memory *)(-1);
+    }
+
+    if (shm_id != -1) {
+        struct shmid_ds ds;
+        if (shmctl(shm_id, IPC_STAT, &ds) == 0 && ds.shm_nattch == 0) {
+            shmctl(shm_id, IPC_RMID, NULL);
+            if (sem_id != -1) {
+                semctl(sem_id, 0, IPC_RMID, sem_arg);
+            }
+            if (sig == 0) {
+                printf("[Разделяемая память и семафоры удалены из системы]\n");
+            }
+        }
+    }
+
+    exit(0);
 }
 
 void append_to_log(const char *name, pid_t pid, const char *msg) {
@@ -92,11 +127,14 @@ void *receiver_thread_func(void *arg) {
     return NULL;
 }
 
+void handle_sigint(int sig) {
+    fclose(stdin);
+}
+
 int main(int argc, char *argv[], char *envp[]) {
+    signal(SIGINT, handle_sigint);
     struct shmid_ds ds;
     unsigned short sem_vals[1];
-    pthread_t recv_thread;
-    void *thread_result;
     int is_creator = 0;
 
     if (argc < 2) {
@@ -109,6 +147,10 @@ int main(int argc, char *argv[], char *envp[]) {
         for (int i = 0; envp[i] != NULL; i++) printf("envp[%d]: %s\n", i, envp[i]);
         for (int i = 0; i < argc; i++) printf("argv[%d]: %s\n", i, argv[i]);
     }
+
+    signal(SIGINT, cleanup);
+    signal(SIGHUP, cleanup);
+    signal(SIGTERM, cleanup);
 
     my_pid = getpid();
     pid_t my_ppid = getppid();
@@ -126,24 +168,10 @@ int main(int argc, char *argv[], char *envp[]) {
         }
     }
 
-    if (is_creator) {
-        sem_id = semget(SEM_KEY, 1, 0666 | IPC_CREAT);
-        if (sem_id == -1) {
-            fprintf(stderr, "semget() error\n");
-            return 1;
-        }
-        sem_vals[0] = 1;
-        sem_arg.array = sem_vals;
-        if (semctl(sem_id, 0, SETALL, sem_arg) == -1) {
-            fprintf(stderr, "semctl() SETALL error\n");
-            return 1;
-        }
-    } else {
-        sem_id = semget(SEM_KEY, 1, 0666);
-        if (sem_id == -1) {
-            fprintf(stderr, "semget() error\n");
-            return 1;
-        }
+    sem_id = semget(SEM_KEY, 1, 0666 | IPC_CREAT);
+    if (sem_id == -1) {
+        fprintf(stderr, "semget() error\n");
+        return 1;
     }
 
     shm_buf = (struct chat_memory *)shmat(shm_id, NULL, 0);
@@ -158,22 +186,35 @@ int main(int argc, char *argv[], char *envp[]) {
         return 1;
     }
 
-    sem_lock(sem_id);
-    if (is_creator || ds.shm_nattch == 1) {
-        shm_buf->msg_id = 0;
+    int active_users = (int)ds.shm_nattch;
+
+    if (is_creator || active_users == 1) {
+        sem_vals[0] = 1;
+        sem_arg.array = sem_vals;
+        if (semctl(sem_id, 0, SETALL, sem_arg) == -1) {
+            fprintf(stderr, "semctl() SETALL error\n");
+            return 1;
+        }
     }
-    shm_buf->active_users = ds.shm_nattch;
+
+    sem_lock(sem_id);
+    if (is_creator || active_users == 1) {
+        shm_buf->msg_id = 0;
+        shm_buf->sender_pid = 0;
+        shm_buf->text[0] = '\0';
+    }
     int initial_msg_id = shm_buf->msg_id;
     sem_unlock(sem_id);
 
     printf("ID памяти: %d | ID семафора: %d | Активных участников: %d\n",
-           shm_id, sem_id, shm_buf->active_users);
+           shm_id, sem_id, active_users);
     printf("Команды: /history (показать лог через fork+exec), /file (отправить файл %s), /exit (выход)\n\n", SRC_FILE);
 
     if (pthread_create(&recv_thread, NULL, &receiver_thread_func, (void *)&initial_msg_id) != 0) {
         fprintf(stderr, "Error creating thread\n");
         return 1;
     }
+    thread_started = 1;
 
     char input[3900];
     while (1) {
@@ -243,29 +284,7 @@ int main(int argc, char *argv[], char *envp[]) {
         sem_unlock(sem_id);
     }
 
-    pthread_cancel(recv_thread);
-    if (!pthread_equal(pthread_self(), recv_thread)) {
-        pthread_join(recv_thread, &thread_result);
-    }
-    if (thread_result == PTHREAD_CANCELED) {
-        fprintf(stderr, "[Поток приема сообщений корректно остановлен (Canceled)]\n");
-    }
-
-    sem_lock(sem_id);
-    shm_buf->active_users--;
-    int remaining = shm_buf->active_users;
-    sem_unlock(sem_id);
-
-    if (shmdt(shm_buf) < 0) {
-        printf("Can't detach shared memory\n");
-    }
-
-    if (remaining <= 0) {
-        shmctl(shm_id, IPC_RMID, NULL);
-        semctl(sem_id, 0, IPC_RMID, sem_arg);
-        printf("[Разделяемая память и семафоры удалены из системы]\n");
-    }
-
+    cleanup(0);
     return 0;
 }
 
