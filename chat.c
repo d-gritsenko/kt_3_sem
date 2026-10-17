@@ -62,12 +62,12 @@ void sem_unlock(int semid) {
 void cleanup(int sig) {
     void *thread_result;
 
-    if (thread_started) {
+    if (sig == 0 && thread_started) {
         pthread_cancel(recv_thread);
         if (!pthread_equal(pthread_self(), recv_thread)) {
             pthread_join(recv_thread, &thread_result);
         }
-        if (sig == 0 && thread_result == PTHREAD_CANCELED) {
+        if (thread_result == PTHREAD_CANCELED) {
             fprintf(stderr, "[Поток приема сообщений корректно остановлен (Canceled)]\n");
         }
     }
@@ -84,6 +84,7 @@ void cleanup(int sig) {
             if (sem_id != -1) {
                 semctl(sem_id, 0, IPC_RMID, sem_arg);
             }
+            remove(LOG_FILE);
             if (sig == 0) {
                 printf("[Разделяемая память и семафоры удалены из системы]\n");
             }
@@ -202,6 +203,7 @@ int main(int argc, char *argv[], char *envp[]) {
         shm_buf->msg_id = 0;
         shm_buf->sender_pid = 0;
         shm_buf->text[0] = '\0';
+        close(open(LOG_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0666));
     }
     int initial_msg_id = shm_buf->msg_id;
     sem_unlock(sem_id);
