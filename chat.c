@@ -90,7 +90,7 @@ void enable_raw_mode() {
 int read_chat_line(char *out_buf, int max_len) {
     input_pos = 0;
     current_input[0] = '\0';
-    printf(CLR_GREEN "Вы > " CLR_RESET);
+    printf(CLR_GREEN "You > " CLR_RESET);
     fflush(stdout);
 
     char c;
@@ -108,7 +108,7 @@ int read_chat_line(char *out_buf, int max_len) {
                     input_pos--;
                 }
                 current_input[input_pos] = '\0';
-                printf("\r\033[K" CLR_GREEN "Вы > " CLR_RESET "%s", current_input);
+                printf("\r\033[K" CLR_GREEN "You > " CLR_RESET "%s", current_input);
                 fflush(stdout);
             }
         } else if ((unsigned char)c >= 32 && input_pos < max_len - 1) {
@@ -129,7 +129,7 @@ void cleanup(int sig) {
             pthread_join(recv_thread, &thread_result);
         }
         if (thread_result == PTHREAD_CANCELED) {
-            fprintf(stderr, "[Поток приема сообщений корректно остановлен (Canceled)]\n");
+            fprintf(stderr, "[Receiver thread cleanly stopped (Canceled)]\n");
         }
     }
 
@@ -147,7 +147,7 @@ void cleanup(int sig) {
             }
             remove(LOG_FILE);
             if (sig == 0) {
-                printf("[Разделяемая память и семафоры удалены из системы]\n");
+                printf("[Shared memory and semaphores removed from system]\n");
             }
         }
     }
@@ -166,7 +166,7 @@ void append_to_log(const char *name, pid_t pid, const char *msg) {
     int len = snprintf(line, sizeof(line), "[%s (PID %d)]: %s\n", name, (int)pid, msg);
     (void)write(fd, line, len);
     if (close(fd) < 0) {
-        printf("Can't close file\n");
+        printf("Can't close log file\n");
     }
 }
 
@@ -182,7 +182,7 @@ void *receiver_thread_func(void *arg) {
             last_seen_id = shm_buf->msg_id;
             if (shm_buf->sender_pid != my_pid) {
                 get_time_str(tbuf, sizeof(tbuf));
-                printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_CYAN "[%s (PID %d)]:" CLR_RESET " %s\n" CLR_GREEN "Вы > " CLR_RESET "%s",
+                printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_CYAN "[%s (PID %d)]:" CLR_RESET " %s\n" CLR_GREEN "You > " CLR_RESET "%s",
                        tbuf, shm_buf->sender_name, (int)shm_buf->sender_pid, shm_buf->text, current_input);
                 fflush(stdout);
             }
@@ -203,7 +203,7 @@ int main(int argc, char *argv[], char *envp[]) {
     int is_creator = 0;
 
     if (argc < 2) {
-        fprintf(stderr, "Использование: %s <Ваше_Имя> [--env]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <Your_Name> [--env]\n", argv[0]);
         return 1;
     }
     strncpy(my_name, argv[1], sizeof(my_name) - 1);
@@ -219,7 +219,7 @@ int main(int argc, char *argv[], char *envp[]) {
 
     my_pid = getpid();
     pid_t my_ppid = getppid();
-    printf("=== Добро пожаловать в чат, %s! (My PID = %d, My PPID = %d) ===\n",
+    printf("=== Welcome to the chat, %s! (My PID = %d, My PPID = %d) ===\n",
            my_name, (int)my_pid, (int)my_ppid);
 
     shm_id = shmget(SHM_KEY, SHMEM_SIZE, IPC_CREAT | IPC_EXCL | 0666);
@@ -273,10 +273,10 @@ int main(int argc, char *argv[], char *envp[]) {
     sem_unlock(sem_id);
 
     printf(CLR_YELLOW "============================================================\n");
-    printf(" ЧАТ ЗАПУЩЕН | Пользователь: %-10s | PID: %d (PPID: %d)\n", my_name, (int)my_pid, (int)my_ppid);
-    printf(" SHM ID: %-4d | SEM ID: %-4d | Участников: %d\n", shm_id, sem_id, active_users);
+    printf(" CHAT STARTED | User: %-15s | PID: %d (PPID: %d)\n", my_name, (int)my_pid, (int)my_ppid);
+    printf(" SHM ID: %-4d | SEM ID: %-4d           | Active Users: %d\n", shm_id, sem_id, active_users);
     printf("------------------------------------------------------------\n");
-    printf(" Команды: /history (история), /file (файл %s), /calc <число>, /exit (выход)\n", SRC_FILE);
+    printf(" Commands: /history, /file (sends %s), /calc <num>, /exit\n", SRC_FILE);
     printf("============================================================\n\n" CLR_RESET);
 
     if (pthread_create(&recv_thread, NULL, &receiver_thread_func, (void *)&initial_msg_id) != 0) {
@@ -297,7 +297,7 @@ int main(int argc, char *argv[], char *envp[]) {
         }
 
         get_time_str(tbuf, sizeof(tbuf));
-        printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[Вы]:" CLR_RESET " %s\n", tbuf, input);
+        printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[You]:" CLR_RESET " %s\n", tbuf, input);
 
         if (strcmp(input, "/exit") == 0) {
             break;
@@ -308,13 +308,13 @@ int main(int argc, char *argv[], char *envp[]) {
             int pipe_to_child[2], pipe_to_parent[2];
             
             if (pipe(pipe_to_child) < 0 || pipe(pipe_to_parent) < 0) {
-                printf(CLR_YELLOW "Ошибка создания pipe\n" CLR_RESET);
+                printf(CLR_YELLOW "Pipe creation error\n" CLR_RESET);
                 continue;
             }
             
             pid_t calc_pid = fork();
             if (calc_pid < 0) {
-                printf(CLR_YELLOW "Ошибка fork\n" CLR_RESET);
+                printf(CLR_YELLOW "Fork error\n" CLR_RESET);
             } else if (calc_pid == 0) { 
                 close(pipe_to_child[1]); 
                 close(pipe_to_parent[0]); 
@@ -336,7 +336,7 @@ int main(int argc, char *argv[], char *envp[]) {
                 
                 int final_result;
                 if (read(pipe_to_parent[0], &final_result, sizeof(int)) > 0) {
-                    printf(CLR_YELLOW "[Система]: Результат /calc: %d^2 = %d\n" CLR_RESET, num, final_result);
+                    printf(CLR_YELLOW "[System]: Result of /calc: %d^2 = %d\n" CLR_RESET, num, final_result);
                 }
                 
                 close(pipe_to_child[1]);
@@ -350,16 +350,16 @@ int main(int argc, char *argv[], char *envp[]) {
             if (chpid < 0) {
                 printf("Can't fork a child process\n");
             } else if (chpid == 0) {
-                printf("\n--- История сообщений (PID потомка: %d, PPID: %d) ---\n",
+                printf("\n--- Message History (Child PID: %d, PPID: %d) ---\n",
                        (int)getpid(), (int)getppid());
                 int res = execle("/bin/cat", "/bin/cat", LOG_FILE, NULL, envp);
                 if (res < 0) {
-                    printf("История пока пуста или ошибка запуска /bin/cat\n");
+                    printf("History is empty or /bin/cat failed to start\n");
                     exit(-1);
                 }
             } else {
                 waitpid(chpid, NULL, 0);
-                printf("--- Конец истории ---\n");
+                printf("--- End of History ---\n");
             }
             continue;
         }
@@ -367,7 +367,7 @@ int main(int argc, char *argv[], char *envp[]) {
         if (strcmp(input, "/file") == 0) {
             int fd = open(SRC_FILE, O_RDONLY);
             if (fd < 0) {
-                printf("Не удалось открыть исходный файл %s (создайте его в текущей папке)\n", SRC_FILE);
+                printf("Failed to open source file %s (create it in the current directory)\n", SRC_FILE);
                 continue;
             }
             sem_lock(sem_id);
@@ -386,7 +386,7 @@ int main(int argc, char *argv[], char *envp[]) {
             append_to_log(my_name, my_pid, shm_buf->text);
             sem_unlock(sem_id);
 
-            printf("[Файл %s отправлен в разделяемую память]\n", SRC_FILE);
+            printf("[File %s sent to shared memory]\n", SRC_FILE);
             continue;
         }
 
@@ -402,4 +402,3 @@ int main(int argc, char *argv[], char *envp[]) {
     cleanup(0);
     return 0;
 }
-
