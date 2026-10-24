@@ -11,13 +11,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <signal.h>
+#include <termios.h>
+#include <time.h>
 
 #define SHMEM_SIZE 4096
-#define SEM_KEY    2007
-#define SHM_KEY    2007
-#define LOG_FILE   "chat_history.txt"
-#define SRC_FILE   "QQQ.Q"
+#define SEM_KEY 2007
+#define SHM_KEY 2007
+#define LOG_FILE "chat_history.txt"
+#define SRC_FILE "QQQ.Q"
+#define CLR_RESET "\033[0m"
+#define CLR_GREEN "\033[1;32m"
+#define CLR_CYAN "\033[1;36m"
+#define CLR_YELLOW "\033[1;33m"
+#define CLR_GRAY "\033[0;90m"
+
+char current_input[3900] = {0};
+int input_pos = 0;
+struct termios orig_termios;
 
 union semnum {
     int val;
@@ -42,7 +52,7 @@ int thread_started = 0;
 void sem_lock(int semid) {
     struct sembuf sb[1];
     sb[0].sem_num = 0;
-    sb[0].sem_op  = -1;
+    sb[0].sem_op = -1;
     sb[0].sem_flg = SEM_UNDO;
     if (semop(semid, sb, 1) < 0) {
         exit(1);
@@ -52,11 +62,62 @@ void sem_lock(int semid) {
 void sem_unlock(int semid) {
     struct sembuf sb[1];
     sb[0].sem_num = 0;
-    sb[0].sem_op  = 1;
+    sb[0].sem_op = 1;
     sb[0].sem_flg = SEM_UNDO;
     if (semop(semid, sb, 1) < 0) {
         exit(1);
     }
+}
+
+void get_time_str(char *buf, size_t size) {
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    strftime(buf, size, "%H:%M:%S", t);
+}
+
+void disable_raw_mode() {
+    tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
+}
+
+void enable_raw_mode() {
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    atexit(disable_raw_mode);
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+}
+
+int read_chat_line(char *out_buf, int max_len) {
+    input_pos = 0;
+    current_input[0] = '\0';
+    printf(CLR_GREEN "Вы > " CLR_RESET);
+    fflush(stdout);
+
+    char c;
+    while (read(STDIN_FILENO, &c, 1) == 1) {
+        if (c == '\n' || c == '\r') {
+            current_input[input_pos] = '\0';
+            strcpy(out_buf, current_input);
+            input_pos = 0;
+            current_input[0] = '\0';
+            return 1;
+        } else if (c == 127 || c == '\b') {
+            if (input_pos > 0) {
+                input_pos--;
+                while (input_pos > 0 && (current_input[input_pos] & 0xC0) == 0x80) {
+                    input_pos--;
+                }
+                current_input[input_pos] = '\0';
+                printf("\r\033[K" CLR_GREEN "Вы > " CLR_RESET "%s", current_input);
+                fflush(stdout);
+            }
+        } else if ((unsigned char)c >= 32 && input_pos < max_len - 1) {
+            current_input[input_pos++] = c;
+            current_input[input_pos] = '\0';
+            write(STDOUT_FILENO, &c, 1);
+        }
+    }
+    return 0;
 }
 
 void cleanup(int sig) {
@@ -91,6 +152,7 @@ void cleanup(int sig) {
         }
     }
 
+    disable_raw_mode();
     exit(0);
 }
 
@@ -110,6 +172,7 @@ void append_to_log(const char *name, pid_t pid, const char *msg) {
 
 void *receiver_thread_func(void *arg) {
     int last_seen_id = *(int *)arg;
+    char tbuf[16];
 
     while (1) {
         usleep(100000);
@@ -118,8 +181,9 @@ void *receiver_thread_func(void *arg) {
         if (shm_buf->msg_id > last_seen_id) {
             last_seen_id = shm_buf->msg_id;
             if (shm_buf->sender_pid != my_pid) {
-                printf("\r\033[K[%s (PID %d)]: %s\nВы > ",
-                       shm_buf->sender_name, (int)shm_buf->sender_pid, shm_buf->text);
+                get_time_str(tbuf, sizeof(tbuf));
+                printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_CYAN "[%s (PID %d)]:" CLR_RESET " %s\n" CLR_GREEN "Вы > " CLR_RESET "%s",
+                       tbuf, shm_buf->sender_name, (int)shm_buf->sender_pid, shm_buf->text, current_input);
                 fflush(stdout);
             }
         }
@@ -208,28 +272,77 @@ int main(int argc, char *argv[], char *envp[]) {
     int initial_msg_id = shm_buf->msg_id;
     sem_unlock(sem_id);
 
-    printf("ID памяти: %d | ID семафора: %d | Активных участников: %d\n",
-           shm_id, sem_id, active_users);
-    printf("Команды: /history (показать лог через fork+exec), /file (отправить файл %s), /exit (выход)\n\n", SRC_FILE);
+    printf(CLR_YELLOW "============================================================\n");
+    printf(" ЧАТ ЗАПУЩЕН | Пользователь: %-10s | PID: %d (PPID: %d)\n", my_name, (int)my_pid, (int)my_ppid);
+    printf(" SHM ID: %-4d | SEM ID: %-4d | Участников: %d\n", shm_id, sem_id, active_users);
+    printf("------------------------------------------------------------\n");
+    printf(" Команды: /history (история), /file (файл %s), /calc <число>, /exit (выход)\n", SRC_FILE);
+    printf("============================================================\n\n" CLR_RESET);
 
     if (pthread_create(&recv_thread, NULL, &receiver_thread_func, (void *)&initial_msg_id) != 0) {
         fprintf(stderr, "Error creating thread\n");
         return 1;
     }
+
     thread_started = 1;
 
+    enable_raw_mode();
+
     char input[3900];
-    while (1) {
-        printf("Вы > ");
-        fflush(stdout);
+    char tbuf[16];
+    while (read_chat_line(input, sizeof(input))) {
+        if (strlen(input) == 0) {
+            printf("\r\033[K");
+            continue;
+        }
 
-        if (fgets(input, sizeof(input), stdin) == NULL) break;
-        input[strcspn(input, "\n")] = '\0';
-
-        if (strlen(input) == 0) continue;
+        get_time_str(tbuf, sizeof(tbuf));
+        printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[Вы]:" CLR_RESET " %s\n", tbuf, input);
 
         if (strcmp(input, "/exit") == 0) {
             break;
+        }
+
+        if (strncmp(input, "/calc ", 6) == 0) {
+            int num = atoi(input + 6);
+            int pipe_to_child[2], pipe_to_parent[2];
+            
+            if (pipe(pipe_to_child) < 0 || pipe(pipe_to_parent) < 0) {
+                printf(CLR_YELLOW "Ошибка создания pipe\n" CLR_RESET);
+                continue;
+            }
+            
+            pid_t calc_pid = fork();
+            if (calc_pid < 0) {
+                printf(CLR_YELLOW "Ошибка fork\n" CLR_RESET);
+            } else if (calc_pid == 0) { 
+                close(pipe_to_child[1]); 
+                close(pipe_to_parent[0]); 
+                
+                int received_num;
+                if (read(pipe_to_child[0], &received_num, sizeof(int)) > 0) {
+                    int result = received_num * received_num;
+                    write(pipe_to_parent[1], &result, sizeof(int));
+                }
+                
+                close(pipe_to_child[0]);
+                close(pipe_to_parent[1]);
+                _exit(0); 
+            } else { 
+                close(pipe_to_child[0]);  
+                close(pipe_to_parent[1]); 
+                
+                write(pipe_to_child[1], &num, sizeof(int));
+                
+                int final_result;
+                if (read(pipe_to_parent[0], &final_result, sizeof(int)) > 0) {
+                    printf(CLR_YELLOW "[Система]: Результат /calc: %d^2 = %d\n" CLR_RESET, num, final_result);
+                }
+                
+                close(pipe_to_child[1]);
+                close(pipe_to_parent[0]);
+            }
+            continue;
         }
 
         if (strcmp(input, "/history") == 0) {
