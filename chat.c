@@ -3,6 +3,7 @@
 #include <sys/shm.h>
 #include <sys/sem.h>
 #include <sys/wait.h>
+#include <sys/msg.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -17,6 +18,7 @@
 #define SHMEM_SIZE 4096
 #define SEM_KEY 2007
 #define SHM_KEY 2007
+#define MSG_KEY 2008
 #define LOG_FILE "chat_history.txt"
 #define SRC_FILE "QQQ.Q"
 #define CLR_RESET "\033[0m"
@@ -42,12 +44,28 @@ struct chat_memory {
     char text[3900];
 };
 
-int shm_id = -1, sem_id = -1;
+struct pm_msg {
+    long mtype;
+    char sender_name[64];
+    char text[3900];
+};
+
+int shm_id = -1, sem_id = -1, msg_qid = -1;
 struct chat_memory *shm_buf = (struct chat_memory *)(-1);
 pid_t my_pid;
 char my_name[64];
 pthread_t recv_thread;
 int thread_started = 0;
+
+// Генерация уникального mtype на основе имени пользователя
+long hash_name(const char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = (unsigned char)*str++)) {
+        hash = ((hash << 5) + hash) + c;
+    }
+    return (hash % 1000000) + 1; // mtype всегда должен быть > 0
+}
 
 void sem_lock(int semid) {
     struct sembuf sb[1];
@@ -145,9 +163,12 @@ void cleanup(int sig) {
             if (sem_id != -1) {
                 semctl(sem_id, 0, IPC_RMID, sem_arg);
             }
+            if (msg_qid != -1) {
+                msgctl(msg_qid, IPC_RMID, NULL);
+            }
             remove(LOG_FILE);
             if (sig == 0) {
-                printf("[Shared memory and semaphores removed from system]\n");
+                printf("[IPC Resources removed from system]\n");
             }
         }
     }
@@ -159,24 +180,32 @@ void cleanup(int sig) {
 void append_to_log(const char *name, pid_t pid, const char *msg) {
     int fd = open(LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd < 0) {
-        printf("Can't open log file\n");
         return;
     }
     char line[4096];
     int len = snprintf(line, sizeof(line), "[%s (PID %d)]: %s\n", name, (int)pid, msg);
     (void)write(fd, line, len);
-    if (close(fd) < 0) {
-        printf("Can't close log file\n");
-    }
+    close(fd);
 }
 
 void *receiver_thread_func(void *arg) {
     int last_seen_id = *(int *)arg;
     char tbuf[16];
+    long my_mtype = hash_name(my_name);
+    struct pm_msg pmsg;
 
     while (1) {
         usleep(100000);
 
+        // Читаем личные сообщения (IPC_NOWAIT позволяет не блокировать поток)
+        while (msgrcv(msg_qid, &pmsg, sizeof(pmsg) - sizeof(long), my_mtype, IPC_NOWAIT) > 0) {
+            get_time_str(tbuf, sizeof(tbuf));
+            printf("\r\033[K" CLR_GRAY "[%s]" CLR_YELLOW " [PM from %s]:" CLR_RESET " %s\n" CLR_GREEN "You > " CLR_RESET "%s",
+                   tbuf, pmsg.sender_name, pmsg.text, current_input);
+            fflush(stdout);
+        }
+
+        // Читаем глобальный чат
         sem_lock(sem_id);
         if (shm_buf->msg_id > last_seen_id) {
             last_seen_id = shm_buf->msg_id;
@@ -219,9 +248,8 @@ int main(int argc, char *argv[], char *envp[]) {
 
     my_pid = getpid();
     pid_t my_ppid = getppid();
-    printf("=== Welcome to the chat, %s! (My PID = %d, My PPID = %d) ===\n",
-           my_name, (int)my_pid, (int)my_ppid);
-
+    
+    // Инициализация IPC: Shared Memory, Semaphores, Message Queue
     shm_id = shmget(SHM_KEY, SHMEM_SIZE, IPC_CREAT | IPC_EXCL | 0666);
     if (shm_id >= 0) {
         is_creator = 1;
@@ -239,6 +267,12 @@ int main(int argc, char *argv[], char *envp[]) {
         return 1;
     }
 
+    msg_qid = msgget(MSG_KEY, IPC_CREAT | 0666);
+    if (msg_qid == -1) {
+        fprintf(stderr, "msgget() error\n");
+        return 1;
+    }
+
     shm_buf = (struct chat_memory *)shmat(shm_id, NULL, 0);
     if (shm_buf == (struct chat_memory *)(-1)) {
         fprintf(stderr, "shmat() error\n");
@@ -246,11 +280,6 @@ int main(int argc, char *argv[], char *envp[]) {
     }
 
     shmctl(shm_id, IPC_STAT, &ds);
-    if (ds.shm_segsz < sizeof(struct chat_memory)) {
-        fprintf(stderr, "error: segsize=%zu\n", ds.shm_segsz);
-        return 1;
-    }
-
     int active_users = (int)ds.shm_nattch;
 
     if (is_creator || active_users == 1) {
@@ -275,15 +304,15 @@ int main(int argc, char *argv[], char *envp[]) {
     printf(CLR_YELLOW "============================================================\n");
     printf(" CHAT STARTED | User: %-15s | PID: %d (PPID: %d)\n", my_name, (int)my_pid, (int)my_ppid);
     printf(" SHM ID: %-4d | SEM ID: %-4d           | Active Users: %d\n", shm_id, sem_id, active_users);
+    printf(" MSG QID: %-3d |\n", msg_qid);
     printf("------------------------------------------------------------\n");
-    printf(" Commands: /history, /file (sends %s), /calc <num>, /exit\n", SRC_FILE);
+    printf(" Commands: /history, /file, /calc <num>, /pm <Name> <Msg>, /exit\n");
     printf("============================================================\n\n" CLR_RESET);
 
     if (pthread_create(&recv_thread, NULL, &receiver_thread_func, (void *)&initial_msg_id) != 0) {
         fprintf(stderr, "Error creating thread\n");
         return 1;
     }
-
     thread_started = 1;
 
     enable_raw_mode();
@@ -297,13 +326,32 @@ int main(int argc, char *argv[], char *envp[]) {
         }
 
         get_time_str(tbuf, sizeof(tbuf));
-        printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[You]:" CLR_RESET " %s\n", tbuf, input);
 
         if (strcmp(input, "/exit") == 0) {
             break;
         }
 
+        if (strncmp(input, "/pm ", 4) == 0) {
+            char target_name[64];
+            char pm_text[3900];
+            
+            if (sscanf(input + 4, "%63s %[^\n]", target_name, pm_text) == 2) {
+                struct pm_msg pmsg;
+                pmsg.mtype = hash_name(target_name);
+                strncpy(pmsg.sender_name, my_name, sizeof(pmsg.sender_name));
+                strcpy(pmsg.text, pm_text);
+                
+                msgsnd(msg_qid, &pmsg, sizeof(pmsg) - sizeof(long), 0);
+                
+                printf("\r\033[K" CLR_GRAY "[%s]" CLR_YELLOW " [PM to %s]:" CLR_RESET " %s\n", tbuf, target_name, pm_text);
+            } else {
+                printf("\r\033[K" CLR_YELLOW "[System]: Usage: /pm <Name> <Text>\n" CLR_RESET);
+            }
+            continue;
+        }
+
         if (strncmp(input, "/calc ", 6) == 0) {
+            printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[You]:" CLR_RESET " %s\n", tbuf, input);
             int num = atoi(input + 6);
             int pipe_to_child[2], pipe_to_parent[2];
             
@@ -346,6 +394,7 @@ int main(int argc, char *argv[], char *envp[]) {
         }
 
         if (strcmp(input, "/history") == 0) {
+            printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[You]:" CLR_RESET " %s\n", tbuf, input);
             pid_t chpid = fork();
             if (chpid < 0) {
                 printf("Can't fork a child process\n");
@@ -365,9 +414,10 @@ int main(int argc, char *argv[], char *envp[]) {
         }
 
         if (strcmp(input, "/file") == 0) {
+            printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[You]:" CLR_RESET " %s\n", tbuf, input);
             int fd = open(SRC_FILE, O_RDONLY);
             if (fd < 0) {
-                printf("Failed to open source file %s (create it in the current directory)\n", SRC_FILE);
+                printf("Failed to open source file %s\n", SRC_FILE);
                 continue;
             }
             sem_lock(sem_id);
@@ -390,6 +440,7 @@ int main(int argc, char *argv[], char *envp[]) {
             continue;
         }
 
+        printf("\r\033[K" CLR_GRAY "[%s]" CLR_RESET " " CLR_GREEN "[You]:" CLR_RESET " %s\n", tbuf, input);
         sem_lock(sem_id);
         shm_buf->sender_pid = my_pid;
         strncpy(shm_buf->sender_name, my_name, sizeof(shm_buf->sender_name) - 1);
